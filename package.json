@@ -1,0 +1,13 @@
+{
+  "name": "tiny-otel",
+  "version": "0.1.0",
+  "description": "Zero-dependency OTLP/HTTP trace exporter for AI agents. Ships OpenTelemetry-compatible JSON spans to Honeycomb, Tempo, SigNoz, Datadog (via otel-collector), or any OTLP endpoint.",
+  "main": "tiny_otel.js",
+  "scripts": {
+    "test": "node test_tiny_otel.js"
+  },
+  "keywords": ["opentelemetry", "otlp", "tracing", "observability", "agent", "zero-dep", "honeycomb", "tempo"],
+  "engines": { "node": ">=18" },
+  "license": "MIT",
+  "files": ["tiny_otel.js", "README.md", "LICENSE"]
+}
