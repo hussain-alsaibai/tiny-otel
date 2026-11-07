@@ -1,9 +1,9 @@
 # tiny-otel
 
-> Zero-dependency **OTLP/HTTP trace exporter** for AI agents and small services.
-> Ships OpenTelemetry-compatible JSON spans to Honeycomb, Tempo, SigNoz,
-> Datadog (via otel-collector), Jaeger, or any OTLP/HTTP endpoint.
-> ~250 LOC, no deps, 1 µs per span creation.
+> Zero-dependency **OTLP/HTTP observability exporter** for AI agents and small services.
+> Ships OpenTelemetry-compatible JSON traces, logs, and metrics to Honeycomb,
+> Grafana Tempo / Loki, SigNoz, Datadog (via otel-collector), Jaeger, or any
+> OTLP/HTTP endpoint. ~900 LOC, no deps, 1 µs per span creation.
 
 ```bash
 npm install tiny-otel
@@ -32,7 +32,6 @@ overkill.
 It deliberately does NOT do:
 
 - gRPC export (use `@opentelemetry/exporter-trace-otlp-grpc`)
-- Metric / log signals (use the official `@opentelemetry/*` packages)
 - Context propagation across HTTP headers (use W3C trace context if needed)
 - Sampling logic (sends everything — plug your sampler in upstream)
 - Auto-instrumentation (wrap your own code; auto-instrumentation is the
@@ -193,6 +192,143 @@ await t.inSpan('llm.call', async (span) => {
   return r;
 });
 ```
+
+## What's new in v0.2.0
+
+### Log signal — `LogEmitter`
+
+Emit OTLP-compatible log records with full trace/span correlation:
+
+```js
+const { logEmitter } = require('tiny-otel');
+
+const logger = logEmitter({
+  endpoint: 'http://localhost:4318/v1/logs',
+  serviceName: 'my-agent',
+});
+
+// With trace correlation (pass span.context() from an active span)
+logger.info('User authenticated', { userId: 42 }, span.context());
+logger.warn('Rate limit approaching', { remaining: 5 });
+logger.error('Database connection failed', { host: 'db.local' });
+
+// Shortcut methods
+logger.log('DEBUG', 'detailed debugging info');
+```
+
+The `LogEmitter` batches records and ships them as OTLP/JSON
+`ExportLogsServiceRequest` envelopes — compatible with any OTLP collector
+(Tempo, SigNoz, Honeycomb, etc.). Severity numbers follow the OTel spec
+(DEBUG=5, INFO=9, WARN=13, ERROR=17, FATAL=21).
+
+### Metric signal — `MetricReader`
+
+In-process aggregation with a Prometheus `/metrics` endpoint AND OTLP
+Metrics export, zero deps:
+
+```js
+const { metricReader } = require('tiny-otel');
+
+const mr = metricReader({ prometheusPort: 9464 });
+
+// Instruments
+const counter = mr.createCounter('http_requests_total', { description: 'Total HTTP requests' });
+const updown  = mr.createUpDownCounter('active_connections', {});
+const hist    = mr.createHistogram('http_request_duration_ms', {
+  boundaries: [5, 10, 25, 50, 100, 250, 500, 1000],
+});
+
+// Recording
+mr.addCounter('http_requests_total', 1, { method: 'GET', status: '200' });
+mr.addUpDownCounter('active_connections', +1, { path: '/api/users' });
+mr.recordHistogram('http_request_duration_ms', 47.3, { method: 'GET' });
+
+// Start Prometheus scrape endpoint (GET /metrics)
+mr.startServer();
+
+// OTLP metrics export (batched, interval-based)
+// Flush manually or rely on automatic flush
+setInterval(() => mr.flush(), 15_000);
+
+// Shutdown
+await mr.shutdown();
+```
+
+Prometheus output example:
+```
+# TYPE my_agent_http_requests_total gauge
+my_agent_http_requests_total{method="GET",status="200"} 1
+# TYPE my_agent_http_request_duration_ms histogram
+my_agent_http_request_duration_ms_bucket{le="50",method="GET"} 1
+my_agent_http_request_duration_ms_count{method="GET"} 1
+my_agent_http_request_duration_ms_sum{method="GET"} 47.3
+```
+
+### Multi-exporter
+
+Fan out to multiple backends simultaneously (e.g. Honeycomb + Grafana Tempo):
+
+```js
+const { MultiExporter } = require('tiny-otel');
+
+const mx = new MultiExporter([
+  { endpoint: 'https://api.honeycomb.io/',   headers: { 'x-honeycomb-team': 'abc' } },
+  { endpoint: 'http://tempo:4318/' },
+]);
+
+// Ship the same payload to all targets
+await mx.send('traces', exportTracePayload);
+await mx.send('logs',   exportLogsPayload);
+await mx.send('metrics', exportMetricsPayload);
+```
+
+### Grafana Loki — `LokiLogHandler`
+
+Structured log push directly to Loki with stream labels:
+
+```js
+const { lokiLogHandler } = require('tiny-otel');
+
+const loki = lokiLogHandler({
+  url:      'https://logs-prod-us-central1.grafana.net/loki/api/v1/push',
+  user:     'your-instance-id',
+  password: process.env.LOKI_API_KEY,
+  panelId:  'my-panel-123',          // forwarded as X-Panel-Id header
+  labels:   'app=tiny-otel,env=prod',
+});
+
+// Standard shortcut methods
+loki.info('Agent started', { agentId: 'agent-7' });
+loki.warn('Budget alert', { budgetUsed: 0.85 });
+loki.error('LLM call failed', { error: err.message }, span.context());
+
+// Shutdown flushes remaining records
+await loki.shutdown();
+```
+
+Loki stream labels (`app`, `env`) are set statically; per-record labels
+(`trace_id`, `span_id`, `level`) are added automatically.
+
+### Resource detection
+
+All signals now auto-detect and attach these resource attributes:
+
+| Attribute | Source |
+| --------- | ------ |
+| `host.name` | `os.hostname()` |
+| `process.pid` | `process.pid` |
+| `telemetry.sdk.version` | tiny-otel version (`0.2.0`) |
+| `telemetry.sdk.name` | `"tiny-otel"` |
+| `process.runtime.version` | `process.version` (Node version) |
+| `container.id` | `/proc/self/cgroup` or `/proc/1/cgroup` (Docker/K8s) |
+
+These are included in every trace, log, and metric export — no config
+needed.
+
+### Backward compatibility
+
+v0.1.0 API is 100% preserved. `tracer()`, `Tracer`, and `Span` work
+exactly as before; just `require('tiny-otel')` and upgrade.
 
 ## License
 
